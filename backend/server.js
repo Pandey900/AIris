@@ -1,11 +1,13 @@
 import http from "http";
 import dotenv from "dotenv";
-import { Server } from "socket.io";
 dotenv.config();
 import app from "./app.js";
+import { Server } from "socket.io";
 import jwt from "jsonwebtoken";
+import redisClient from "./services/redis.service.js";
 import mongoose from "mongoose";
 import projectModel from "./models/project.model.js";
+import Message from "./models/message.model.js";
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -14,95 +16,120 @@ const io = new Server(server, {
   },
 });
 
+// Helper function to save a message to the database
+async function saveMessage(messageData) {
+  try {
+    const newMessage = new Message({
+      projectId: messageData.projectId,
+      sender: messageData.sender,
+      senderName: messageData.senderName,
+      senderEmail: messageData.senderEmail,
+      senderGender: messageData.senderGender,
+      message: messageData.message,
+      timestamp: messageData.timestamp || new Date(),
+    });
+
+    return await newMessage.save();
+  } catch (error) {
+    console.error("Error saving message:", error);
+    return null;
+  }
+}
+
+// Helper function to load previous messages
+async function loadPreviousMessages(projectId, limit = 50) {
+  try {
+    return await Message.find({ projectId })
+      .sort({ createdAt: 1 }) // Oldest to newest
+      .limit(limit)
+      .lean();
+  } catch (error) {
+    console.error("Error loading messages:", error);
+    return [];
+  }
+}
+
 io.use(async (socket, next) => {
   try {
     const token =
       socket.handshake.auth?.token ||
       socket.handshake.headers.authorization?.split(" ")[1];
     const projectId = socket.handshake.query.projectId;
-
-    if (!projectId) {
-      return next(new Error("Project ID is required"));
-    }
-
     if (!mongoose.Types.ObjectId.isValid(projectId)) {
-      return next(new Error("Invalid Project ID"));
+      return next(new Error("Invalid Project ID format"));
     }
 
-    try {
-      const project = await projectModel.findById(projectId);
-      if (project) {
-        // Store the project in socket object
-        socket.project = project;
-      } else {
-        // Create a fallback object with the projectId
-        socket.project = { _id: projectId };
-        console.log(
-          `Warning: Project ${projectId} not found but allowing connection`
-        );
-      }
-    } catch (err) {
-      console.error(`Error fetching project: ${err.message}`);
-      socket.project = { _id: projectId };
+    socket.project = await projectModel.findById(projectId);
+    if (!socket.project) {
+      return next(new Error("Project not found"));
     }
 
     if (!token) {
-      return next(new Error("Authentication error"));
+      return next(new Error("Unauthorized User"));
     }
-
+    const isBlackListed = await redisClient.get(token);
+    if (isBlackListed) {
+      return next(new Error("Unauthorized User"));
+    }
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     if (!decoded) {
-      return next(new Error("Authentication error"));
+      return next(new Error("Unauthorized User"));
     }
-
     socket.user = decoded;
     next();
-  } catch (error) {
-    console.error(`Socket authentication error: ${error.message}`);
-    next(error);
+  } catch (err) {
+    next(err);
   }
 });
 
-// Socket.io connection handling
 io.on("connection", (socket) => {
+  socket.roomId = socket.project._id.toString();
+
   console.log("New client connected");
+  console.log(socket.project._id.toString());
+  socket.join(socket.roomId);
 
-  // Check if socket.project exists before joining
-  if (socket.project && socket.project._id) {
-    socket.join(socket.project._id.toString());
-    console.log(`Client joined room: ${socket.project._id}`);
-  } else {
-    console.error("Cannot join room: socket.project._id is undefined");
-  }
-
-  socket.on("project-message", async (data) => {
-    console.log("Received message:", data);
-    if (socket.project && socket.project._id) {
-      // Broadcast to all clients in the room except sender
-      socket.broadcast
-        .to(socket.project._id.toString())
-        .emit("project-message", data);
-
-      // You could also save the message to database here if not handled by API
-      // This would be an alternative to the frontend API call
-
-      try {
-        const newMessage = new messageModel({
-          content: data.content,
-          projectId: socket.project._id,
-          senderId: socket.user._id,
-        });
-        await newMessage.save();
-      } catch (err) {
-        console.error("Error saving socket message:", err);
+  // Send previous messages when user connects
+  (async () => {
+    try {
+      const messages = await loadPreviousMessages(socket.project._id);
+      if (messages.length > 0) {
+        socket.emit("previous-messages", messages);
       }
-    } else {
-      console.error("Cannot broadcast: socket.project._id is undefined");
+    } catch (err) {
+      console.error("Error loading previous messages:", err);
     }
+  })();
+
+  // Modified to save messages to database
+  socket.on("project-message", async (data) => {
+    try {
+      // Add project ID to the message data
+      const messageWithProjectId = {
+        ...data,
+        projectId: socket.project._id,
+      };
+
+      // Save to database
+      await saveMessage(messageWithProjectId);
+
+      // Broadcast to others
+      socket.broadcast.to(socket.roomId).emit("project-message", data);
+    } catch (error) {
+      console.error("Error handling message:", error);
+    }
+  });
+
+  socket.on("event", (data) => {
+    /* … */
   });
 
   socket.on("disconnect", () => {
     console.log("Client disconnected");
+    socket.leave(socket.roomId);
+    socket.to(socket.roomId).emit("user-disconnected", {
+      message: "A user has disconnected",
+    });
   });
 });
 

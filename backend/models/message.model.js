@@ -2,28 +2,34 @@ import mongoose from "mongoose";
 
 const messageSchema = new mongoose.Schema(
   {
-    content: {
-      type: String,
-      required: true,
-      trim: true,
-    },
     projectId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Project",
       required: true,
-      index: true, // Add index for faster queries by projectId
+      index: true,
     },
-    senderId: {
+    sender: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+    },
+    senderName: String,
+    senderEmail: String,
+    senderGender: String,
+    message: {
+      type: String,
+      required: true,
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now,
     },
   },
   { timestamps: true }
 );
 
-// Add compound index for better query performance
+// Index for efficient retrieval
 messageSchema.index({ projectId: 1, createdAt: 1 });
 
-const messageModel = mongoose.model("Message", messageSchema);
-export default messageModel;
+const Message = mongoose.model("Message", messageSchema);
+export default Message;

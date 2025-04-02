@@ -2,12 +2,12 @@ import React, { useState, useEffect, useRef, useContext } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import axios from "../config/axios";
 import {
-  initializeSocket,
+  initilizeSocket,
   receiveMessage,
-  sendMessage as socketSendMessage,
-  disconnectSocket,
+  sendMessage,
 } from "../config/socket.js";
-import { UserContext } from "../context/user.context";
+
+import { UserContext } from "../context/user.context.jsx";
 
 const Project = () => {
   const location = useLocation();
@@ -26,12 +26,8 @@ const Project = () => {
   const [showConfirmation, setShowConfirmation] = useState(false);
   const [userToRemove, setUserToRemove] = useState(null);
   const [isRemoving, setIsRemoving] = useState(false);
-
-  // New message-related states
-  const [messages, setMessages] = useState([]);
-  const [newMessage, setNewMessage] = useState("");
-  const [isMessagesLoading, setIsMessagesLoading] = useState(false);
-  const [messageSending, setMessageSending] = useState(false);
+  const [message, setMessage] = useState("");
+  const messageBox = useRef(null);
 
   // Use projectId from project object or location state but no hardcoded fallback
   const projectId = project._id || location.state?.project?._id;
@@ -46,55 +42,52 @@ const Project = () => {
 
   // Fetch users from API and initialize socket
   useEffect(() => {
-    // Only initialize socket if projectId exists
-    let socketInitialized = false;
+    initilizeSocket(project._id);
 
-    if (projectId) {
-      const socket = initializeSocket(projectId);
-      socketInitialized = !!socket;
+    receiveMessage("project-message", (data) => {
+      // Check if this message is from the current logged-in user
+      const isOwnMessage = data.sender === user._id;
 
-      if (socketInitialized) {
-        // Set up message listener
-        receiveMessage("project-message", (messageData) => {
-          console.log("Received message:", messageData);
-          if (messageData) {
-            setMessages((prevMessages) => [...prevMessages, messageData]);
-          }
-        });
-      }
-    }
-
-    // Updated fetchMessages function with better error handling
-    const fetchMessages = async () => {
-      if (!projectId) return;
-
-      setIsMessagesLoading(true);
-      try {
-        try {
-          const response = await axios.get(`/messages/${projectId}`);
-          if (response.data && response.data.messages) {
-            setMessages(response.data.messages);
-          }
-        } catch (err) {
-          // Log the specific error for debugging
-          console.error("Error details:", err.response?.data || err.message);
-
-          // Initialize with empty messages instead of failing
-          setMessages([]);
-
-          // You could also add a user-friendly error message
-          setError((prev) => ({
-            ...prev,
-            messages: "Couldn't fetch messages. Please try again later.",
-          }));
+      if (isOwnMessage) {
+        // Don't append the message again if it's our own (we already did in send())
+        console.log("Skipping own message that we already displayed");
+        return;
+      } else {
+        // This is from another user, append as incoming message
+        appendIncomingMessage(data);
+        if (messageEndRef.current) {
+          messageEndRef.current.scrollIntoView({ behavior: "smooth" });
         }
-      } catch (err) {
-        console.error("Fatal error fetching messages:", err);
-        setMessages([]);
-      } finally {
-        setIsMessagesLoading(false);
       }
-    };
+    });
+
+    // New handler for previous messages
+    receiveMessage("previous-messages", (messages) => {
+      if (!Array.isArray(messages) || !messages.length) return;
+
+      console.log(`Loaded ${messages.length} previous messages`);
+
+      // Clear existing messages
+      const messageContainer = messageBox.current;
+      if (messageContainer) {
+        messageContainer.innerHTML = "";
+      }
+
+      // Display previous messages
+      messages.forEach((msg) => {
+        const isOwnMessage = msg.sender === user._id;
+        if (isOwnMessage) {
+          appendOutgoingMessage(msg);
+        } else {
+          appendIncomingMessage(msg);
+        }
+      });
+
+      // Scroll to bottom
+      if (messageEndRef.current) {
+        messageEndRef.current.scrollIntoView({ behavior: "smooth" });
+      }
+    });
 
     const fetchUsers = async () => {
       setIsLoading(true);
@@ -156,20 +149,7 @@ const Project = () => {
 
     fetchUsers();
     fetchProjectDetails();
-    fetchMessages();
-
-    // Clean up socket on unmount
-    return () => {
-      if (socketInitialized) {
-        disconnectSocket();
-      }
-    };
   }, [projectId]);
-
-  // Auto-scroll to bottom when new messages arrive
-  useEffect(() => {
-    messageEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
 
   const toggleUserSelection = (userId) => {
     setSelectedUsers((prev) => {
@@ -184,6 +164,36 @@ const Project = () => {
   const handleAddCollaborators = () => {
     setIsModalOpen(true);
   };
+
+  function send() {
+    if (!user || !user._id) {
+      console.error("User not found. Please log in again.");
+      alert("You need to be logged in to send messages.");
+      return;
+    }
+
+    if (!message.trim()) {
+      console.error("Cannot send an empty message.");
+      return;
+    }
+
+    // Create a complete message object with all needed fields
+    const messageData = {
+      message: message.trim(),
+      sender: user._id,
+      senderName: user.name || user.email?.split("@")[0] || "User",
+      senderEmail: user.email,
+      senderGender: user.gender || "male",
+      timestamp: new Date().toISOString(),
+    };
+
+    sendMessage("project-message", messageData);
+
+    // Also append the outgoing message to your own chat
+    appendOutgoingMessage(messageData);
+
+    setMessage("");
+  }
 
   const handleCloseModal = () => {
     setSelectedUsers([]);
@@ -293,85 +303,6 @@ const Project = () => {
     }
   };
 
-  // Handle sending a message - renamed to avoid conflict with socketSendMessage
-  // Enhanced handleSendMessage function
-  const handleSendMessage = async (e) => {
-    e.preventDefault();
-    if (!newMessage.trim() || !projectId || messageSending) return;
-
-    setMessageSending(true);
-    try {
-      // Send to API first for persistence
-      const response = await axios.post("/messages", {
-        projectId,
-        content: newMessage.trim(),
-      });
-
-      // If API call succeeds, use the returned message object (with proper ID and timestamp)
-      if (response.data && response.data.message) {
-        const savedMessage = response.data.message;
-
-        // Add to local state
-        setMessages((prev) => [...prev, savedMessage]);
-
-        // Then broadcast via socket to other users
-        socketSendMessage("project-message", savedMessage);
-
-        // Clear input
-        setNewMessage("");
-      }
-    } catch (err) {
-      console.error(
-        "Error sending message:",
-        err.response?.data || err.message
-      );
-      alert("Failed to send message. Please try again.");
-    } finally {
-      setMessageSending(false);
-    }
-  };
-
-  // Format date for messages
-  const formatMessageTime = (dateString) => {
-    const date = new Date(dateString);
-    return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  };
-
-  // Format date for message groups
-  const formatMessageDate = (dateString) => {
-    const date = new Date(dateString);
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-
-    if (date.toDateString() === today.toDateString()) {
-      return "Today";
-    } else if (date.toDateString() === yesterday.toDateString()) {
-      return "Yesterday";
-    } else {
-      return date.toLocaleDateString();
-    }
-  };
-
-  // Group messages by date
-  const groupMessagesByDate = (messages) => {
-    const groups = {};
-
-    messages.forEach((message) => {
-      const date = new Date(message.createdAt).toDateString();
-      if (!groups[date]) {
-        groups[date] = [];
-      }
-      groups[date].push(message);
-    });
-
-    // Convert to array of {date, messages} objects
-    return Object.entries(groups).map(([date, messages]) => ({
-      date,
-      messages,
-    }));
-  };
-
   // Show error or loading state if no project is selected
   if (!projectId) {
     return (
@@ -392,6 +323,95 @@ const Project = () => {
     );
   }
 
+  // For incoming messages (from others)
+  function appendIncomingMessage(messageObject) {
+    const messageContainer = messageBox.current;
+
+    if (!messageContainer) {
+      console.error("Message container ref is null!");
+      return;
+    }
+
+    try {
+      const message = document.createElement("div");
+      message.classList.add(
+        "message",
+        "flex",
+        "items-start",
+        "gap-2",
+        "max-w-[80%]",
+        "mb-3"
+      );
+
+      // Make sure we have all required fields with fallbacks
+      const avatar =
+        messageObject.senderAvatar || getAvatar(messageObject.gender || "male");
+      const name =
+        messageObject.senderName || messageObject.senderEmail || "User";
+      const msg = messageObject.message || "";
+      const time = messageObject.time || new Date().toLocaleTimeString();
+
+      message.innerHTML = `
+      <div class="w-8 h-8 rounded-full bg-blue-200 flex-shrink-0 overflow-hidden">
+        <img class="w-full h-full object-cover" src="${avatar}" alt="User avatar"/>
+      </div>
+      <div>
+        <div class="bg-gray-100 p-3 rounded-lg rounded-tl-none">
+          <p class="text-sm font-medium text-gray-800">${name}</p>
+          <p class="text-gray-700">${msg}</p>
+        </div>
+        <span class="text-xs text-gray-500 mt-1 inline-block">${time}</span>
+      </div>`;
+
+      messageContainer.appendChild(message);
+      messageContainer.scrollTop = messageContainer.scrollHeight;
+    } catch (error) {
+      console.error("Error appending message:", error);
+    }
+  }
+
+  // Add function for outgoing messages (your own)
+  function appendOutgoingMessage(messageObject) {
+    const messageContainer = messageBox.current;
+    if (!messageContainer) return;
+
+    try {
+      const message = document.createElement("div");
+      message.classList.add(
+        "message",
+        "flex",
+        "items-start",
+        "justify-end",
+        "gap-2",
+        "max-w-[80%]",
+        "ml-auto",
+        "mb-3"
+      );
+
+      // Get your information
+      const avatar = getAvatar(user.gender || "male");
+      const name = user.name || user.email?.split("@")[0] || "You";
+      const msg = messageObject.message || "";
+      const time = new Date().toLocaleTimeString();
+
+      message.innerHTML = `
+      <div>
+        <div class="bg-blue-500 p-3 rounded-lg rounded-tr-none">
+          <p class="text-sm font-medium text-white">${name}</p>
+          <p class="text-white">${msg}</p>
+        </div>
+        <span class="text-xs text-gray-500 mt-1 inline-block float-right">${time}</span>
+      </div>
+      <div class="w-8 h-8 rounded-full bg-blue-200 flex-shrink-0 overflow-hidden">
+        <img class="w-full h-full object-cover" src="${avatar}" alt="Your avatar"/>
+      </div>`;
+
+      messageContainer.appendChild(message);
+      messageContainer.scrollTop = messageContainer.scrollHeight;
+    } catch (error) {
+      console.error("Error appending outgoing message:", error);
+    }
+  }
   return (
     <main className="h-screen w-full flex flex-col md:flex-row overflow-hidden">
       <section className="left h-full md:h-screen flex flex-col w-full md:w-1/4 md:min-w-72 lg:min-w-80 bg-slate-500 hover:bg-slate-600 transition duration-200 ease-in-out relative">
@@ -410,6 +430,47 @@ const Project = () => {
             <i className="ri-group-fill"></i>
           </button>
         </header>
+
+        <div className="conversation-area flex-grow flex flex-col p-4 bg-white rounded-lg shadow-md overflow-hidden">
+          {/* Messages Container */}
+          <div
+            ref={messageBox}
+            className="message-box flex-1 overflow-y-auto mb-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent pr-2"
+          ></div>
+
+          {/* Input Field */}
+          <div className="inputField flex items-center gap-2 border-t pt-4">
+            <div className="flex-1 relative">
+              <input
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault(); // Prevents adding a new line
+                    send(); // Call the send function
+                  }
+                }}
+                className="w-full p-3 pl-4 pr-10 border rounded-full bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:bg-white transition-all"
+                type="text"
+                placeholder="Enter your message..."
+              />
+              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex space-x-1">
+                <button className="text-gray-400 hover:text-gray-600 p-1">
+                  <i className="ri-emotion-line text-lg"></i>
+                </button>
+                <button className="text-gray-400 hover:text-gray-600 p-1">
+                  <i className="ri-attachment-2 text-lg"></i>
+                </button>
+              </div>
+            </div>
+            <button
+              onClick={send}
+              className="bg-blue-500 hover:bg-blue-600 transition-colors text-white p-3 rounded-full flex items-center justify-center"
+            >
+              <i className="ri-send-plane-fill text-lg"></i>
+            </button>
+          </div>
+        </div>
 
         {/* Side Panel */}
         <div
@@ -466,108 +527,6 @@ const Project = () => {
               </div>
             )}
           </div>
-        </div>
-
-        {/* Messages Section - Updated */}
-        <div className="conversation-area flex flex-col p-2 md:p-4 overflow-hidden flex-1 bg-gray-50">
-          {/* Messages container */}
-          <div className="messages flex-1 overflow-y-auto mb-4 pr-2">
-            {isMessagesLoading ? (
-              <div className="flex justify-center items-center h-full">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-              </div>
-            ) : messages.length > 0 ? (
-              groupMessagesByDate(messages).map((group, groupIndex) => (
-                <div key={groupIndex} className="mb-6">
-                  <div className="date-divider flex items-center my-3">
-                    <div className="h-px flex-1 bg-gray-200"></div>
-                    <span className="px-3 text-xs text-gray-500 bg-gray-50">
-                      {formatMessageDate(group.date)}
-                    </span>
-                    <div className="h-px flex-1 bg-gray-200"></div>
-                  </div>
-
-                  {group.messages.map((message, index) => {
-                    const user = projectMembers.find(
-                      (member) => member._id === message.senderId
-                    );
-
-                    return (
-                      <div
-                        key={message._id || index}
-                        className="message mb-4 animate-fadeIn"
-                      >
-                        <div className="flex items-start">
-                          <img
-                            src={getAvatar(user?.gender || "male")}
-                            alt="Avatar"
-                            className="w-8 h-8 rounded-full mr-3 mt-1"
-                          />
-                          <div className="flex-1">
-                            <div className="flex items-baseline">
-                              <h4 className="font-medium text-sm text-gray-900">
-                                {user?.name ||
-                                  user?.email?.split("@")[0] ||
-                                  "Unknown User"}
-                              </h4>
-                              <span className="ml-2 text-xs text-gray-500">
-                                {formatMessageTime(message.createdAt)}
-                              </span>
-                            </div>
-                            <div className="message-content mt-1 text-gray-700 bg-white p-3 rounded-lg shadow-sm border border-gray-100">
-                              {message.content}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              ))
-            ) : (
-              <div className="flex flex-col items-center justify-center h-full text-gray-500">
-                <i className="ri-chat-3-line text-4xl mb-2"></i>
-                <p>No messages yet</p>
-                <p className="text-sm">Be the first to send a message!</p>
-              </div>
-            )}
-            <div ref={messageEndRef} /> {/* Empty div for auto-scrolling */}
-          </div>
-
-          {/* Message input form */}
-          <form
-            onSubmit={handleSendMessage}
-            className="message-input flex items-end rounded-lg border bg-white p-2 shadow-sm"
-          >
-            <textarea
-              value={newMessage}
-              onChange={(e) => setNewMessage(e.target.value)}
-              placeholder="Type your message..."
-              className="flex-1 border-none bg-transparent p-2 focus:outline-none resize-none max-h-32"
-              rows={1}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  handleSendMessage(e); // Use the correct function name
-                }
-              }}
-            />
-            <button
-              type="submit"
-              className={`ml-2 rounded-full p-2 ${
-                newMessage.trim() && !messageSending
-                  ? "bg-blue-500 text-white hover:bg-blue-600"
-                  : "bg-gray-200 text-gray-400 cursor-not-allowed"
-              }`}
-              disabled={!newMessage.trim() || messageSending}
-            >
-              {messageSending ? (
-                <div className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full"></div>
-              ) : (
-                <i className="ri-send-plane-fill text-lg"></i>
-              )}
-            </button>
-          </form>
         </div>
       </section>
 

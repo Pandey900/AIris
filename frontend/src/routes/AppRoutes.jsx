@@ -4,7 +4,8 @@ import Home from "../screens/Home";
 import Login from "../screens/Login";
 import Register from "../screens/Register";
 import Project from "../screens/Project";
-import UserAuth from "../auth/user.auth";
+import UserAuth from "../auth/UserAuth";
+
 const AppRoutes = () => {
   return (
     <BrowserRouter>

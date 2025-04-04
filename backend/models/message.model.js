@@ -24,6 +24,11 @@ const messageSchema = new mongoose.Schema(
       type: Date,
       default: Date.now,
     },
+    // Added isAI field to identify AI-generated messages
+    isAI: {
+      type: Boolean,
+      default: false,
+    },
   },
   { timestamps: true }
 );

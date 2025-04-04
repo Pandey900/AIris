@@ -8,7 +8,10 @@ import {
 } from "../config/socket.js";
 
 import { UserContext } from "../context/user.context.jsx";
-
+import Markdown from "markdown-to-jsx";
+import { createRoot } from "react-dom/client";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 const Project = () => {
   const location = useLocation();
   const navigate = useNavigate();
@@ -28,6 +31,10 @@ const Project = () => {
   const [isRemoving, setIsRemoving] = useState(false);
   const [message, setMessage] = useState("");
   const messageBox = useRef(null);
+  const { logout } = useContext(UserContext);
+  // Add these state variables with your other states
+  const [selectedAIMessage, setSelectedAIMessage] = useState(null);
+  const [isAIMessagePanelOpen, setIsAIMessagePanelOpen] = useState(false);
 
   // Use projectId from project object or location state but no hardcoded fallback
   const projectId = project._id || location.state?.project?._id;
@@ -62,10 +69,9 @@ const Project = () => {
     });
 
     // New handler for previous messages
+    // In your useEffect where you handle previous-messages
     receiveMessage("previous-messages", (messages) => {
       if (!Array.isArray(messages) || !messages.length) return;
-
-      console.log(`Loaded ${messages.length} previous messages`);
 
       // Clear existing messages
       const messageContainer = messageBox.current;
@@ -75,11 +81,16 @@ const Project = () => {
 
       // Display previous messages
       messages.forEach((msg) => {
-        const isOwnMessage = msg.sender === user._id;
-        if (isOwnMessage) {
-          appendOutgoingMessage(msg);
+        // Check if this is an AI message
+        if (msg.isAI || msg.sender === "ai-assistant") {
+          appendIncomingMessage(msg); // Always display AI as incoming
         } else {
-          appendIncomingMessage(msg);
+          const isOwnMessage = msg.sender === user._id;
+          if (isOwnMessage) {
+            appendOutgoingMessage(msg);
+          } else {
+            appendIncomingMessage(msg);
+          }
         }
       });
 
@@ -163,6 +174,13 @@ const Project = () => {
 
   const handleAddCollaborators = () => {
     setIsModalOpen(true);
+  };
+  // Add this logout function in your Project component
+  const handleLogout = () => {
+    // Remove token from localStorage
+    localStorage.removeItem("token");
+    // Redirect to login page
+    navigate("/login");
   };
 
   function send() {
@@ -324,50 +342,135 @@ const Project = () => {
   }
 
   // For incoming messages (from others)
-  function appendIncomingMessage(messageObject) {
+  // Function to append an incoming message
+  function appendIncomingMessage(data) {
     const messageContainer = messageBox.current;
+    if (!messageContainer) return;
 
-    if (!messageContainer) {
-      console.error("Message container ref is null!");
-      return;
-    }
+    // Determine if this is an AI message
+    const isAIMessage = data.isAI || data.sender === "ai-assistant";
 
-    try {
-      const message = document.createElement("div");
-      message.classList.add(
-        "message",
-        "flex",
-        "items-start",
-        "gap-2",
-        "max-w-[80%]",
-        "mb-3"
-      );
+    const message = document.createElement("div");
+    message.classList.add(
+      "message",
+      "flex",
+      "items-start",
+      "gap-2",
+      "max-w-[80%]",
+      "mb-3"
+    );
 
-      // Make sure we have all required fields with fallbacks
-      const avatar =
-        messageObject.senderAvatar || getAvatar(messageObject.gender || "male");
-      const name =
-        messageObject.senderName || messageObject.senderEmail || "User";
-      const msg = messageObject.message || "";
-      const time = messageObject.time || new Date().toLocaleTimeString();
+    if (isAIMessage) {
+      // Use React to render Markdown for AI messages
+      const messageDiv = document.createElement("div");
+      messageDiv.className = "ai-message-content";
+      message.appendChild(messageDiv);
 
-      message.innerHTML = `
-      <div class="w-8 h-8 rounded-full bg-blue-200 flex-shrink-0 overflow-hidden">
-        <img class="w-full h-full object-cover" src="${avatar}" alt="User avatar"/>
-      </div>
-      <div>
-        <div class="bg-gray-100 p-3 rounded-lg rounded-tl-none">
-          <p class="text-sm font-medium text-gray-800">${name}</p>
-          <p class="text-gray-700">${msg}</p>
+      // Add timestamp separately
+      const timestamp = document.createElement("span");
+      timestamp.className = "text-xs text-gray-500 mt-1 inline-block";
+      timestamp.textContent = new Date(data.timestamp).toLocaleTimeString();
+      message.appendChild(timestamp);
+
+      // Make the message clickable
+      message.classList.add("cursor-pointer", "hover:opacity-90");
+      message.addEventListener("click", () => {
+        // Store the clicked message and open the panel
+        setSelectedAIMessage(data);
+        setIsAIMessagePanelOpen(true);
+      });
+
+      // Use ReactDOM to render Markdown and SyntaxHighlighter into the messageDiv
+      const root = createRoot(messageDiv);
+      root.render(
+        <div>
+          <div className="bg-purple-100 border border-purple-300 p-3 rounded-lg rounded-tl-none shadow-md">
+            <span className="font-semibold text-purple-800 block mb-1">
+              AI Assistant
+            </span>
+            <div className="text-gray-800 markdown-content">
+              // Update this part of your Markdown options in
+              appendIncomingMessage
+              <Markdown
+                options={{
+                  overrides: {
+                    code: {
+                      component: ({ className, children }) => {
+                        const language =
+                          className?.replace("language-", "") || "text";
+                        return (
+                          <SyntaxHighlighter
+                            language={language}
+                            style={oneDark}
+                            showLineNumbers
+                          >
+                            {children}
+                          </SyntaxHighlighter>
+                        );
+                      },
+                    },
+                    // Add these new overrides to fix the nesting issue
+                    pre: {
+                      component: ({ children }) => <>{children}</>,
+                    },
+                    p: {
+                      component: ({ children, ...props }) => {
+                        // Check if children contains a SyntaxHighlighter component
+                        const containsCodeBlock = React.Children.toArray(
+                          children
+                        ).some(
+                          (child) =>
+                            React.isValidElement(child) &&
+                            (child.type === SyntaxHighlighter ||
+                              (child.props &&
+                                child.props.children &&
+                                React.isValidElement(child.props.children) &&
+                                child.props.children.type ===
+                                  SyntaxHighlighter))
+                        );
+
+                        // If this paragraph contains a code block, render without p tag
+                        if (containsCodeBlock) {
+                          return <>{children}</>;
+                        }
+
+                        // Otherwise render as normal paragraph
+                        return <p {...props}>{children}</p>;
+                      },
+                    },
+                  },
+                }}
+              >
+                {data.message}
+              </Markdown>
+            </div>
+          </div>
         </div>
-        <span class="text-xs text-gray-500 mt-1 inline-block">${time}</span>
-      </div>`;
-
-      messageContainer.appendChild(message);
-      messageContainer.scrollTop = messageContainer.scrollHeight;
-    } catch (error) {
-      console.error("Error appending message:", error);
+      );
+    } else {
+      // Regular user message (existing code)
+      message.innerHTML = `
+        <div class="w-8 h-8 rounded-full bg-blue-200 flex-shrink-0 overflow-hidden">
+          <img class="w-full h-full object-cover" src="${getAvatar(
+            data.senderGender || "male"
+          )}" />
+        </div>
+        <div>
+          <div class="bg-gray-100 p-3 rounded-lg rounded-tl-none">
+            <span class="font-semibold text-gray-800 block mb-1">${
+              data.senderName || "User"
+            }</span>
+            <p class="text-gray-800">${data.message}</p>
+          </div>
+          <span class="text-xs text-gray-500 mt-1 inline-block">
+            ${new Date(data.timestamp).toLocaleTimeString()}
+          </span>
+        </div>
+      `;
     }
+
+    messageContainer.appendChild(message);
+    messageContainer.scrollTop = messageContainer.scrollHeight;
   }
 
   // Add function for outgoing messages (your own)
@@ -414,6 +517,15 @@ const Project = () => {
   }
   return (
     <main className="h-screen w-full flex flex-col md:flex-row overflow-hidden">
+      <div className="fixed top-4 right-4 z-50">
+        <button
+          onClick={handleLogout}
+          className="flex items-center gap-2 px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg shadow-md transition-colors"
+        >
+          <i className="ri-logout-box-r-line"></i>
+          Logout
+        </button>
+      </div>
       <section className="left h-full md:h-screen flex flex-col w-full md:w-1/4 md:min-w-72 lg:min-w-80 bg-slate-500 hover:bg-slate-600 transition duration-200 ease-in-out relative">
         <header className="flex justify-between items-center p-2 md:p-4 w-full bg-slate-200 rounded-b-lg hover:bg-slate-300 transition duration-200 ease-in-out">
           <button
@@ -430,7 +542,6 @@ const Project = () => {
             <i className="ri-group-fill"></i>
           </button>
         </header>
-
         <div className="conversation-area flex-grow flex flex-col p-4 bg-white rounded-lg shadow-md overflow-hidden">
           {/* Messages Container */}
           <div
@@ -454,14 +565,6 @@ const Project = () => {
                 type="text"
                 placeholder="Enter your message..."
               />
-              <div className="absolute right-3 top-1/2 -translate-y-1/2 flex space-x-1">
-                <button className="text-gray-400 hover:text-gray-600 p-1">
-                  <i className="ri-emotion-line text-lg"></i>
-                </button>
-                <button className="text-gray-400 hover:text-gray-600 p-1">
-                  <i className="ri-attachment-2 text-lg"></i>
-                </button>
-              </div>
             </div>
             <button
               onClick={send}
@@ -469,6 +572,11 @@ const Project = () => {
             >
               <i className="ri-send-plane-fill text-lg"></i>
             </button>
+          </div>
+
+          {/* AI Tip - Add this right here */}
+          <div className="text-xs text-gray-500 mt-1 px-3">
+            Tip: Type @ai followed by your question to get AI assistance
           </div>
         </div>
 
@@ -661,6 +769,120 @@ const Project = () => {
             </div>
           </div>
         </div>
+      )}
+      {/* Overlay for AI message panel - ADD THIS HERE */}
+      {isAIMessagePanelOpen && (
+        <div
+          className="fixed inset-0 bg-black bg-opacity-30 z-30"
+          onClick={() => setIsAIMessagePanelOpen(false)}
+        ></div>
+      )}
+      {/* AI Message Detail Panel */}
+      {isAIMessagePanelOpen && selectedAIMessage && (
+        <section className="ai-message-panel fixed right-0 top-0 h-screen w-full md:w-2/3 lg:w-1/2 bg-white shadow-xl z-40 overflow-y-auto flex flex-col transition-all duration-300 ease-in-out">
+          <header className="sticky top-0 bg-purple-100 p-4 border-b border-purple-200 flex justify-between items-center z-10">
+            <h3 className="font-semibold text-purple-900">
+              <i className="ri-robot-line mr-2"></i>
+              AI Assistant
+            </h3>
+            <button
+              onClick={() => setIsAIMessagePanelOpen(false)}
+              className="p-2 rounded-full hover:bg-purple-200 transition"
+            >
+              <i className="ri-close-line text-lg"></i>
+            </button>
+          </header>
+          <div className="flex-1 p-6 overflow-y-auto">
+            <div className="max-w-3xl mx-auto">
+              <div className="text-sm text-gray-500 mb-4">
+                {new Date(selectedAIMessage.timestamp).toLocaleString()}
+              </div>
+              <div className="bg-purple-50 p-6 rounded-lg shadow-sm border border-purple-100">
+                <div className="prose prose-lg markdown-content">
+                  <Markdown
+                    options={{
+                      overrides: {
+                        // Override for code inline elements
+                        code: {
+                          component: ({ className, children }) => {
+                            // Only apply SyntaxHighlighter to code blocks with language class
+                            if (className) {
+                              const language = className.replace(
+                                "language-",
+                                ""
+                              );
+                              return (
+                                <SyntaxHighlighter
+                                  language={language}
+                                  style={oneDark}
+                                  showLineNumbers
+                                >
+                                  {children}
+                                </SyntaxHighlighter>
+                              );
+                            }
+                            // For inline code, return a simple code element
+                            return <code>{children}</code>;
+                          },
+                        },
+                        // Handle pre blocks directly to avoid nesting issues
+                        pre: {
+                          component: ({ children }) => {
+                            // Extract code element if it exists
+                            if (React.Children.count(children) === 1) {
+                              const child = React.Children.only(children);
+                              if (
+                                React.isValidElement(child) &&
+                                child.type === "code"
+                              ) {
+                                // Skip rendering the <pre> since SyntaxHighlighter will handle it
+                                return child;
+                              }
+                            }
+                            // Otherwise pass through as normal pre
+                            return <pre>{children}</pre>;
+                          },
+                        },
+                        // Prevent paragraphs from wrapping code blocks
+                        p: {
+                          component: ({ children }) => {
+                            // Check for direct SyntaxHighlighter children or code > SyntaxHighlighter patterns
+                            const childArray = React.Children.toArray(children);
+
+                            // If there's only one child and it's a SyntaxHighlighter or code element
+                            if (childArray.length === 1) {
+                              const onlyChild = childArray[0];
+                              if (
+                                React.isValidElement(onlyChild) &&
+                                (onlyChild.type === SyntaxHighlighter ||
+                                  onlyChild.type === "code")
+                              ) {
+                                return <>{onlyChild}</>;
+                              }
+                            }
+
+                            return <p>{children}</p>;
+                          },
+                        },
+                      },
+                    }}
+                  >
+                    {selectedAIMessage.message}
+                  </Markdown>
+                </div>
+              </div>
+
+              <div className="mt-6 flex justify-end">
+                <button
+                  onClick={() => setIsAIMessagePanelOpen(false)}
+                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
       )}
     </main>
   );

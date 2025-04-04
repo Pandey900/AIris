@@ -15,6 +15,7 @@ export const createUser = async ({ email, password, gender }) => {
 
   const hashedPassword = await userModel.hashPassword(password);
   const user = await userModel.create({
+    name: email.split("@")[0],
     email,
     password: hashedPassword,
     gender: gender.toLowerCase(),

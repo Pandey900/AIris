@@ -4,6 +4,7 @@ import { UserContext } from "../context/user.context.jsx";
 import axios from "../config/axios.js";
 
 const Register = () => {
+  const [name, setName] = useState(""); // Add state for name
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [gender, setGender] = useState(""); // Added state for gender
@@ -14,6 +15,7 @@ const Register = () => {
     e.preventDefault();
     axios
       .post("/users/register", {
+        name,
         email,
         password,
         gender, // Include gender in request
@@ -34,6 +36,21 @@ const Register = () => {
       <div className="w-full max-w-md p-6 bg-gray-800 rounded-xl shadow-lg">
         <h2 className="text-2xl font-semibold text-center mb-4">Register</h2>
         <form onSubmit={submitHandler}>
+          {/* Name field - add this */}
+          <div className="mb-4">
+            <label className="block mb-1 text-sm">Full Name</label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full p-2 border rounded-md bg-gray-700 border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              required
+              minLength="3"
+              maxLength="50"
+              placeholder="Enter your full name"
+            />
+          </div>
+
           <div className="mb-4">
             <label className="block mb-1 text-sm">Email</label>
             <input
@@ -42,6 +59,9 @@ const Register = () => {
               onChange={(e) => setEmail(e.target.value)}
               className="w-full p-2 border rounded-md bg-gray-700 border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
+              minLength="6"
+              maxLength="50"
+              placeholder="Enter your email"
             />
           </div>
           <div className="mb-4">
@@ -52,6 +72,9 @@ const Register = () => {
               onChange={(e) => setPassword(e.target.value)}
               className="w-full p-2 border rounded-md bg-gray-700 border-gray-600 text-white focus:outline-none focus:ring-2 focus:ring-blue-500"
               required
+              minLength="3"
+              maxLength="50"
+              placeholder="Enter your password"
             />
           </div>
 

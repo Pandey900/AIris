@@ -10,7 +10,7 @@ export const createUserController = async (req, res) => {
   }
   try {
     // Check if gender is provided
-    const { email, password, gender } = req.body;
+    const { name, email, password, gender } = req.body;
 
     if (!gender) {
       return res.status(400).json({ error: "Gender is required" });
@@ -25,6 +25,7 @@ export const createUserController = async (req, res) => {
 
     // Pass complete user data to service
     const user = await userService.createUser({
+      name,
       email,
       password,
       gender: gender.toLowerCase(), // Ensure consistent casing

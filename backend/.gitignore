@@ -1,0 +1,7 @@
+PORT=8080
+MONGODB_URI=mongodb+srv://aviriteshpandey900:bTjMDszq91wPN99a@airis.raiyx.mongodb.net/?retryWrites=true&w=majority&appName=AIris
+JWT_SECRET=Ew5c6nCKsrIn25/C9eGito7W6H4VaEpdi0SZ6s+snJ8=
+REDIS_HOST=redis-18976.crce182.ap-south-1-1.ec2.redns.redis-cloud.com
+REDIS_PORT=18976
+REDIS_PASSWORD=A8PMumbD16WadpHkzDG67XAR4Cc19zPo
+GOOGLE_AI_KEY=AIzaSyACR_scLChDWA5RBvi914PuDbNaDwbQlAE

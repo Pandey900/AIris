@@ -1,10 +1,27 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vite + React</title>
+    <!-- Fixed paths for highlight.js -->
+    <link
+      rel="stylesheet"
+      href="/cdn/highlight.js/11.9.0/styles/default.min.css"
+    />
+    <script
+      crossorigin
+      src="/cdn/highlight.js/11.9.0/highlight.min.js"
+    ></script>
+    <!-- Initialize highlight.js -->
+    <script>
+      window.onload = function () {
+        if (window.hljs) {
+          window.hljs.highlightAll();
+        }
+      };
+    </script>
   </head>
   <body>
     <div id="root"></div>

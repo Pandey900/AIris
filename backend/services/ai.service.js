@@ -21,53 +21,38 @@ const model = genAI.getGenerativeModel({
   You are an expert in writing desktop applications and you always write desktop applications that are scalable and maintainable. 
   You are an expert in writing command line applications and you always write command line applications that are scalable and maintainable.
 
+  Example:
 
-
-  Examples:
-
-
-  user: "Create an express server".
-  AI:{
-  "app.js":"
-  import express from "express";
-
-  const app = express();
-
-
-  app.use(express.json());
-
-
-  app.get("/", (req, res) => {
-    res.send("Hello World!");
-  });
-
-
-  app.listen(3000, () => {
-    console.log("Server is running on port 3000");
-  });
-
-  ",
-  "package.json":"
-                {
-                  "name": "temp-server",
-                  "version": "1.0.0",
-                  "main": "app.js",
-                  "type": "module",
-                  "scripts": {
-                    "test": "echo \"Error: no test specified\" && exit 1"
-                  },
-                  "keywords": [],
-                  "author": "",
-                  "license": "ISC",
-                  "description": "",
-                  "dependencies": {
-                    "express": "^5.1.0"
-                  }
-                }",
-  "buildCommand":"{mainItem:"npm", commands:["install", "start"]},
-  "testCommand":{mainItem:"npm", commands:["test"]},",
-  "startCommand":"{mainItem:"node", commands:["app.js"]}",
-  }`,
+  user: "Create an express server"
+  response: {
+    "text": "Created an Express server with basic configuration.",
+    "fileTree": {
+      "app.js": {
+        "file": {
+          "contents": "import express from \\"express\\";\\n\\nconst app = express();\\n\\napp.use(express.json());\\n\\napp.get(\\"/\\", (req, res) => {\\n  res.send(\\"Hello World!\\");\\n});\\n\\napp.listen(3000, () => {\\n  console.log(\\"Server is running on port 3000\\");\\n});"
+        }
+      },
+      "package.json": {
+        "file": {
+          "contents": "{\\n  \\"name\\": \\"express-es6-server\\",\\n  \\"version\\": \\"1.0.0\\",\\n  \\"description\\": \\"Express server with ES6 imports\\",\\n  \\"main\\": \\"app.js\\",\\n  \\"type\\": \\"module\\",\\n  \\"scripts\\": {\\n    \\"start\\": \\"node app.js\\",\\n    \\"dev\\": \\"nodemon app.js\\",\\n    \\"test\\": \\"echo \\\\\\"Error: no test specified\\\\\\" && exit 1\\"\\n  },\\n  \\"keywords\\": [\\n    \\"express\\",\\n    \\"es6\\",\\n    \\"import\\"\\n  ],\\n  \\"author\\": \\"\\",\\n  \\"license\\": \\"ISC\\",\\n  \\"dependencies\\": {\\n    \\"express\\": \\"^4.18.2\\"\\n  },\\n  \\"devDependencies\\": {\\n    \\"nodemon\\": \\"^3.0.1\\"\\n  }\\n}"
+        }
+      }
+    },
+    "buildCommand": {
+      "mainItem": "npm",
+      "commands": ["install", "start"]
+    },
+    "testCommand": {
+      "mainItem": "npm", 
+      "commands": ["test"]
+    },
+    "startCommand": {
+      "mainItem": "node",
+      "commands": ["app.js"]
+    }
+  },
+  Important: Do Not Generate Files Like routes/app.js and all other files that are already present in the project.
+  Only generate files that are not present in the project.`,
 });
 
 export const generateResult = async (prompt) => {

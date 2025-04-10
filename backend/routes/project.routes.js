@@ -46,4 +46,12 @@ router.put(
   projectController.removeUserFromProject
 );
 
+router.put(
+  "/update-file-tree",
+  authMiddleWare.authUser,
+  body("projectId").isString().withMessage("Project ID is required"),
+  body("fileTree").isObject().withMessage("File tree is required"),
+  body("fileTree").notEmpty().withMessage("File tree cannot be empty"),
+  projectController.updateFileTree
+);
 export default router;

@@ -133,4 +133,35 @@ export const removeUsersFromProject = async ({
 
   return updatedProject;
 };
+
+export const updateFileTree = async ({ projectId, fileTree }) => {
+  if (!projectId) {
+    throw new Error("Project ID is required");
+  }
+  if (!mongoose.Types.ObjectId.isValid(projectId)) {
+    throw new Error("Invalid Project ID format");
+  }
+  if (!fileTree) {
+    throw new Error("File tree is required");
+  }
+
+  // Verify the current user has access to this project
+  const project = await projectModel.findOneAndUpdate(
+    {
+      _id: projectId,
+    },
+    {
+      fileTree: fileTree,
+    },
+    {
+      new: true,
+    }
+  );
+  if (!project) {
+    throw new Error("Project not found");
+  }
+  project.fileTree = fileTree;
+  await project.save();
+  return project;
+};
 export default { createProject };

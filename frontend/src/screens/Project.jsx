@@ -12,10 +12,15 @@ import Markdown from "markdown-to-jsx";
 import { createRoot } from "react-dom/client";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+// Add these imports at the top of your file
+import hljs from "highlight.js";
+import "highlight.js/styles/vs2015.css";
+import { getWebContainer } from "../config/webContainer.js";
+import { debounce } from "lodash";
 const Project = () => {
   const location = useLocation();
   const navigate = useNavigate();
-  const { user } = useContext(UserContext);
+  const { user, isAuthenticated } = useContext(UserContext);
   const messageEndRef = useRef(null);
   const [isSidePanelOpen, setIsSidePanelOpen] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -35,6 +40,13 @@ const Project = () => {
   // Add these state variables with your other states
   const [selectedAIMessage, setSelectedAIMessage] = useState(null);
   const [isAIMessagePanelOpen, setIsAIMessagePanelOpen] = useState(false);
+  const [fileTree, setFileTree] = useState({});
+  const [webContainer, setWebContainer] = useState(null);
+  const [iframeUrl, setiframeUrl] = useState(null);
+  const [isServerRunning, setIsServerRunning] = useState(false);
+  const [serverProcess, setServerProcess] = useState(null);
+  const [currentFile, setCurrentFile] = useState(null);
+  const [openFiles, setOpenFiles] = useState([]);
 
   // Use projectId from project object or location state but no hardcoded fallback
   const projectId = project._id || location.state?.project?._id;
@@ -50,8 +62,36 @@ const Project = () => {
   // Fetch users from API and initialize socket
   useEffect(() => {
     initilizeSocket(project._id);
+    async function initContainer() {
+      try {
+        console.log("Starting WebContainer initialization...");
+        const container = await getWebContainer();
+
+        if (!container) {
+          console.error("WebContainer initialization failed - returned null");
+          setServerOutput((prev) => [
+            ...prev,
+            "⚠️ WebContainer failed to initialize. Preview functionality will be limited.",
+          ]);
+          return;
+        }
+
+        setWebContainer(container);
+        console.log("WebContainer initialized successfully:", container);
+      } catch (error) {
+        console.error("Error initializing WebContainer:", error);
+        setServerOutput((prev) => [...prev, `⚠️ Error: ${error.message}`]);
+      }
+    }
+    initContainer();
 
     receiveMessage("project-message", (data) => {
+      console.log("Received message:", JSON.parse(data.message));
+      const message = JSON.parse(data.message);
+      if (message.fileTree) {
+        setFileTree(message.fileTree);
+      }
+      webContainer?.mount[message.fileTree].file.contents;
       // Check if this message is from the current logged-in user
       const isOwnMessage = data.sender === user._id;
 
@@ -124,6 +164,7 @@ const Project = () => {
         const response = await axios.get(`/projects/get-projects/${projectId}`);
         if (response.data && response.data.project) {
           setProject(response.data.project);
+          setFileTree(response.data.project.fileTree || {});
 
           // Now fetch the details of each user in the project
           if (
@@ -161,7 +202,51 @@ const Project = () => {
     fetchUsers();
     fetchProjectDetails();
   }, [projectId]);
+  // Add this useEffect after your other useEffects to update highlighting when code changes
+  useEffect(() => {
+    if (currentFile && fileTree[currentFile]) {
+      hljs.highlightAll();
+    }
+  }, [currentFile, fileTree]);
 
+  function saveFileTree(ft) {
+    axios
+      .put("/projects/update-file-tree", {
+        projectId: project._id,
+        fileTree: ft,
+      })
+      .then((response) => {
+        console.log(response.data);
+        alert("File tree updated successfully!");
+      })
+      .catch((error) => {
+        console.error(error);
+        alert("Error updating file tree. Please try again.");
+      });
+  }
+  // Add this CSS in a style tag or in your CSS file
+  const editorStyles = `
+  .code-with-line-numbers {
+    counter-reset: line;
+  }
+  
+  .code-with-line-numbers .hljs-line::before {
+    counter-increment: line;
+    content: counter(line);
+    display: inline-block;
+    width: 1.5em;
+    margin-right: 1em;
+    color: #555;
+    text-align: right;
+  }
+  
+  .hljs-code {
+    background: #1e1e1e;
+    padding: 0;
+    margin: 0;
+    width: 100%;
+  }
+`;
   const toggleUserSelection = (userId) => {
     setSelectedUsers((prev) => {
       if (prev.includes(userId)) {
@@ -213,6 +298,119 @@ const Project = () => {
     setMessage("");
   }
 
+  // Add this function after the getAvatar function
+  const processAIGeneratedFiles = (message) => {
+    try {
+      // First, try to parse JSON response with fileTree structure
+      const jsonMatch = message.match(/```json\s*({[\s\S]*?})\s*```/);
+      if (jsonMatch) {
+        const jsonData = JSON.parse(jsonMatch[1]);
+        if (jsonData.fileTree) {
+          setFileTree((prev) => {
+            const updatedTree = {
+              ...prev,
+              ...jsonData.fileTree,
+            };
+
+            // Save the updated file tree
+            saveFileTree(updatedTree);
+
+            return updatedTree;
+          });
+
+          // Open the first new file
+          const firstNewFile = Object.keys(jsonData.fileTree)[0];
+          setCurrentFile(firstNewFile);
+          setOpenFiles((prev) =>
+            prev.includes(firstNewFile) ? prev : [...prev, firstNewFile]
+          );
+
+          return true;
+        }
+      }
+
+      // Fall back to regex pattern matching for code blocks
+      const codeBlockRegex =
+        /```([a-zA-Z0-9_+-]+)?\s*(?:\/\/\s*filepath:\s*([^\n]+))?\s*\n([\s\S]*?)```/g;
+      let match;
+      const newFiles = {};
+
+      // Update in processAIGeneratedFiles function
+      while ((match = codeBlockRegex.exec(message)) !== null) {
+        const language = match[1] || "text";
+        const filePath = match[2];
+        const code = match[3].replace(/\\n/g, "\n"); // Convert escaped newlines
+
+        if (filePath) {
+          const fileName = filePath.split("/").pop().split("\\").pop();
+
+          // Map file extension to highlight.js language if needed
+          const fileExt = fileName.split(".").pop().toLowerCase();
+          let hlLanguage = language;
+
+          // Common mappings for highlight.js
+          const langMap = {
+            js: "javascript",
+            jsx: "javascript",
+            ts: "typescript",
+            tsx: "typescript",
+            py: "python",
+            md: "markdown",
+          };
+
+          if (langMap[fileExt]) {
+            hlLanguage = langMap[fileExt];
+          }
+
+          newFiles[fileName] = {
+            content: code,
+            language: hlLanguage,
+          };
+        }
+      }
+
+      if (Object.keys(newFiles).length > 0) {
+        setFileTree((prev) => ({
+          ...prev,
+          ...newFiles,
+        }));
+
+        const firstNewFile = Object.keys(newFiles)[0];
+        setCurrentFile(firstNewFile);
+        setOpenFiles((prev) =>
+          prev.includes(firstNewFile) ? prev : [...prev, firstNewFile]
+        );
+
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      console.error("Error processing AI files:", error);
+      return false;
+    }
+  };
+
+  const debouncedSaveFileTree = debounce((treeToSave) => {
+    saveFileTree(treeToSave);
+  }, 1000); // Save after 1 second of inactivity
+
+  const updateContent = (fileName, newContent) => {
+    setFileTree((prev) => {
+      const updatedTree = {
+        ...prev,
+        [fileName]: {
+          ...prev[fileName],
+          file: {
+            ...prev[fileName].file,
+            contents: newContent,
+          },
+        },
+      };
+
+      return updatedTree;
+    });
+  };
   const handleCloseModal = () => {
     setSelectedUsers([]);
     setIsModalOpen(false);
@@ -362,10 +560,18 @@ const Project = () => {
 
     if (isAIMessage) {
       // Use React to render Markdown for AI messages
+      const containsFiles = processAIGeneratedFiles(data.message);
       const messageDiv = document.createElement("div");
       messageDiv.className = "ai-message-content";
       message.appendChild(messageDiv);
 
+      if (containsFiles) {
+        const fileNotice = document.createElement("div");
+        fileNotice.className =
+          "text-xs bg-green-100 text-green-800 px-2 py-1 rounded mt-1";
+        fileNotice.innerHTML = "🗂️ New file(s) added to editor";
+        message.appendChild(fileNotice);
+      }
       // Add timestamp separately
       const timestamp = document.createElement("span");
       timestamp.className = "text-xs text-gray-500 mt-1 inline-block";
@@ -516,375 +722,645 @@ const Project = () => {
     }
   }
   return (
-    <main className="h-screen w-full flex flex-col md:flex-row overflow-hidden">
-      <div className="fixed top-4 right-4 z-50">
-        <button
-          onClick={handleLogout}
-          className="flex items-center gap-2 px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg shadow-md transition-colors"
-        >
-          <i className="ri-logout-box-r-line"></i>
-          Logout
-        </button>
-      </div>
-      <section className="left h-full md:h-screen flex flex-col w-full md:w-1/4 md:min-w-72 lg:min-w-80 bg-slate-500 hover:bg-slate-600 transition duration-200 ease-in-out relative">
-        <header className="flex justify-between items-center p-2 md:p-4 w-full bg-slate-200 rounded-b-lg hover:bg-slate-300 transition duration-200 ease-in-out">
+    <>
+      <style>{editorStyles}</style>
+      <main className="h-screen w-full flex flex-col md:flex-row overflow-hidden">
+        <div className="fixed top-4 right-4 z-50 flex items-center gap-2">
           <button
-            className="flex items-center gap-2 p-2 rounded-lg bg-slate-300 hover:bg-slate-400 transition duration-200 ease-in-out"
-            onClick={handleAddCollaborators}
+            onClick={handleLogout}
+            className="flex items-center gap-2 px-3 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg shadow-md transition-colors"
           >
-            <i className="ri-user-add-fill"></i>
-            <p>Add Collaborators</p>
+            <i className="ri-logout-box-r-line"></i>
+            Logout
           </button>
-          <button
-            onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
-            className="p-2 rounded-full bg-slate-300 hover:bg-slate-400 transition duration-200 ease-in-out"
-          >
-            <i className="ri-group-fill"></i>
-          </button>
-        </header>
-        <div className="conversation-area flex-grow flex flex-col p-4 bg-white rounded-lg shadow-md overflow-hidden">
-          {/* Messages Container */}
-          <div
-            ref={messageBox}
-            className="message-box flex-1 overflow-y-auto mb-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent pr-2"
-          ></div>
 
-          {/* Input Field */}
-          <div className="inputField flex items-center gap-2 border-t pt-4">
-            <div className="flex-1 relative">
-              <input
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault(); // Prevents adding a new line
-                    send(); // Call the send function
-                  }
-                }}
-                className="w-full p-3 pl-4 pr-10 border rounded-full bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:bg-white transition-all"
-                type="text"
-                placeholder="Enter your message..."
-              />
-            </div>
+          {iframeUrl && (
             <button
-              onClick={send}
-              className="bg-blue-500 hover:bg-blue-600 transition-colors text-white p-3 rounded-full flex items-center justify-center"
+              onClick={() => setiframeUrl(null)} // Close the iframe by setting its URL to null
+              className="flex items-center gap-2 px-3 py-2 bg-gray-500 hover:bg-gray-600 text-white rounded-lg shadow-md transition-colors"
             >
-              <i className="ri-send-plane-fill text-lg"></i>
+              <i className="ri-close-line"></i>
+              Close Output
             </button>
-          </div>
-
-          {/* AI Tip - Add this right here */}
-          <div className="text-xs text-gray-500 mt-1 px-3">
-            Tip: Type @ai followed by your question to get AI assistance
-          </div>
+          )}
         </div>
-
-        {/* Side Panel */}
-        <div
-          className={`sidePanel absolute inset-0 bg-white shadow-lg z-10 transition-transform duration-300 ${
-            isSidePanelOpen ? "translate-x-0" : "-translate-x-full"
-          }`}
-        >
-          <header className="flex items-center justify-between bg-gray-100 p-4 border-b">
-            <h3 className="font-medium text-gray-800">Group Members</h3>
+        <section className="left h-full md:h-screen flex flex-col w-full md:w-1/4 md:min-w-72 lg:min-w-80 bg-slate-500 hover:bg-slate-600 transition duration-200 ease-in-out relative">
+          <header className="flex justify-between items-center p-2 md:p-4 w-full bg-slate-200 rounded-b-lg hover:bg-slate-300 transition duration-200 ease-in-out">
             <button
-              onClick={() => setIsSidePanelOpen(false)}
-              className="p-2 rounded-full hover:bg-gray-200 transition"
+              className="flex items-center gap-2 p-2 rounded-lg bg-slate-300 hover:bg-slate-400 transition duration-200 ease-in-out"
+              onClick={handleAddCollaborators}
             >
-              <i className="ri-close-line text-lg"></i>
+              <i className="ri-user-add-fill"></i>
+              <p>Add Collaborators</p>
+            </button>
+            <button
+              onClick={() => setIsSidePanelOpen(!isSidePanelOpen)}
+              className="p-2 rounded-full bg-slate-300 hover:bg-slate-400 transition duration-200 ease-in-out"
+            >
+              <i className="ri-group-fill"></i>
             </button>
           </header>
-          <div className="users flex flex-col gap-3 p-4 overflow-y-auto h-[calc(100%-60px)]">
-            {isProjectMembersLoading ? (
-              <div className="flex justify-center items-center h-32">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-              </div>
-            ) : projectMembers.length > 0 ? (
-              projectMembers.map((user) => (
-                <div
-                  key={user._id}
-                  className="user p-2 rounded-lg hover:bg-gray-100 flex justify-between items-center"
-                >
-                  <div className="flex items-center gap-3">
-                    <img
-                      src={getAvatar(user.gender)}
-                      alt={`${user.email}'s avatar`}
-                      className="w-10 h-10 rounded-full"
-                    />
-                    <div>
-                      <div className="font-medium text-gray-800">
-                        {user.name || user.email.split("@")[0]}
-                      </div>
-                      <div className="text-xs text-gray-500">{user.email}</div>
-                    </div>
-                  </div>
-                  {/* Remove button */}
-                  <button
-                    onClick={() => initiateRemoveUser(user)}
-                    className="p-2 text-gray-400 hover:text-red-500 transition-colors"
-                    title="Remove collaborator"
-                  >
-                    <i className="ri-delete-bin-line"></i>
-                  </button>
-                </div>
-              ))
-            ) : (
-              <div className="text-center text-gray-500 py-4">
-                No collaborators in this project
-              </div>
-            )}
-          </div>
-        </div>
-      </section>
+          <div className="conversation-area flex-grow flex flex-col p-4 bg-white rounded-lg shadow-md overflow-hidden">
+            {/* Messages Container */}
+            <div
+              ref={messageBox}
+              className="message-box flex-1 overflow-y-auto mb-4 space-y-3 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-transparent pr-2"
+            ></div>
 
-      {/* User Selection Modal */}
-      {isModalOpen && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
-            {/* Modal Header */}
-            <div className="flex justify-between items-center p-4 border-b">
-              <h3 className="text-lg font-medium">Select Collaborators</h3>
+            {/* Input Field */}
+            <div className="inputField flex items-center gap-2 border-t pt-4">
+              <div className="flex-1 relative">
+                <input
+                  value={message}
+                  onChange={(e) => setMessage(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault(); // Prevents adding a new line
+                      send(); // Call the send function
+                    }
+                  }}
+                  className="w-full p-3 pl-4 pr-10 border rounded-full bg-gray-50 focus:outline-none focus:ring-2 focus:ring-blue-300 focus:bg-white transition-all"
+                  type="text"
+                  placeholder="Enter your message..."
+                />
+              </div>
               <button
-                onClick={handleCloseModal}
-                className="p-1 rounded-full hover:bg-gray-100"
+                onClick={send}
+                className="bg-blue-500 hover:bg-blue-600 transition-colors text-white p-3 rounded-full flex items-center justify-center"
               >
-                <i className="ri-close-line text-xl"></i>
+                <i className="ri-send-plane-fill text-lg"></i>
               </button>
             </div>
 
-            {/* Modal Body - User List */}
-            <div className="overflow-y-auto p-4 flex-grow">
-              {isLoading ? (
+            {/* AI Tip - Add this right here */}
+            <div className="text-xs text-gray-500 mt-1 px-3">
+              Tip: Type @ai followed by your question to get AI assistance
+            </div>
+          </div>
+
+          {/* Side Panel */}
+          <div
+            className={`sidePanel absolute inset-0 bg-white shadow-lg z-10 transition-transform duration-300 ${
+              isSidePanelOpen ? "translate-x-0" : "-translate-x-full"
+            }`}
+          >
+            <header className="flex items-center justify-between bg-gray-100 p-4 border-b">
+              <h3 className="font-medium text-gray-800">Group Members</h3>
+              <button
+                onClick={() => setIsSidePanelOpen(false)}
+                className="p-2 rounded-full hover:bg-gray-200 transition"
+              >
+                <i className="ri-close-line text-lg"></i>
+              </button>
+            </header>
+            <div className="users flex flex-col gap-3 p-4 overflow-y-auto h-[calc(100%-60px)]">
+              {isProjectMembersLoading ? (
                 <div className="flex justify-center items-center h-32">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
                 </div>
-              ) : error ? (
-                <div className="text-center text-red-500 py-4">{error}</div>
-              ) : (
-                <div className="space-y-2">
-                  {users
-                    .filter(
-                      (user) =>
-                        !projectMembers.some(
-                          (member) => member._id === user._id
-                        )
-                    )
-                    .map((user) => (
-                      <div
-                        key={user._id}
-                        onClick={() => toggleUserSelection(user._id)}
-                        className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
-                          selectedUsers.includes(user._id)
-                            ? "bg-blue-100 border border-blue-300"
-                            : "hover:bg-gray-50 border border-transparent"
-                        }`}
-                      >
-                        <div className="relative">
-                          <img
-                            src={getAvatar(user.gender)}
-                            alt={`${user.name || user.email}'s avatar`}
-                            className="w-12 h-12 rounded-full"
-                          />
-                          {selectedUsers.includes(user._id) && (
-                            <div className="absolute -top-1 -right-1 bg-blue-500 rounded-full w-5 h-5 flex items-center justify-center">
-                              <i className="ri-check-line text-white text-sm"></i>
-                            </div>
-                          )}
+              ) : projectMembers.length > 0 ? (
+                projectMembers.map((user) => (
+                  <div
+                    key={user._id}
+                    className="user p-2 rounded-lg hover:bg-gray-100 flex justify-between items-center"
+                  >
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={getAvatar(user.gender)}
+                        alt={`${user.email}'s avatar`}
+                        className="w-10 h-10 rounded-full"
+                      />
+                      <div>
+                        <div className="font-medium text-gray-800">
+                          {user.name || user.email.split("@")[0]}
                         </div>
-                        <div className="flex-grow">
-                          <p className="font-medium">
-                            {user.name || user.email.split("@")[0]}
-                          </p>
-                          <p className="text-sm text-gray-500">{user.email}</p>
+                        <div className="text-xs text-gray-500">
+                          {user.email}
                         </div>
                       </div>
-                    ))}
+                    </div>
+                    {/* Remove button */}
+                    <button
+                      onClick={() => initiateRemoveUser(user)}
+                      className="p-2 text-gray-400 hover:text-red-500 transition-colors"
+                      title="Remove collaborator"
+                    >
+                      <i className="ri-delete-bin-line"></i>
+                    </button>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center text-gray-500 py-4">
+                  No collaborators in this project
                 </div>
               )}
             </div>
+          </div>
+        </section>
 
-            {/* Modal Footer */}
-            <div className="border-t p-4 flex justify-end space-x-3">
-              <button
-                onClick={handleCloseModal}
-                className="px-4 py-2 border rounded-lg hover:bg-gray-50"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleSaveSelection}
-                disabled={selectedUsers.length === 0 || isLoading}
-                className={`px-4 py-2 rounded-lg text-white ${
-                  selectedUsers.length === 0 || isLoading
-                    ? "bg-blue-300 cursor-not-allowed"
-                    : "bg-blue-500 hover:bg-blue-600"
-                }`}
-              >
-                Add Selected ({selectedUsers.length})
-              </button>
+        <section className="right bg-red-200 flex-grow h-full flex">
+          <div className="explorer h-full max-w-64 min-w-52 p-2 bg-slate-400 hover:bg-slate-500 transition duration-200 ease-in-out relative">
+            <div className="file-tree ">
+              {/* <div className="tree-element p-2 px-4 flex items-center gap-2 bg-gray-100 rounded-lg mb-2 cursor-pointer hover:bg-gray-200 transition duration-200 ease-in-out">
+              <i className="ri-folder-2-fill text-gray-500"></i>
+              <p className="font-semibold text-lg">app.js</p>
+            </div> */}
+              {Object.keys(fileTree).map((file) => (
+                <button
+                  key={file}
+                  className="tree-element p-2 px-4 flex items-center gap-2 bg-gray-100 rounded-lg mb-2 cursor-pointer hover:bg-gray-200 transition duration-200 ease-in-out"
+                  onClick={() => {
+                    // Handle file click here (e.g., open file in editor)
+                    setCurrentFile(file);
+                    setOpenFiles((prev) => {
+                      if (!prev.includes(file)) {
+                        return [...prev, file];
+                      }
+                      return prev;
+                    });
+                    const fileContent = fileTree[file].file.contents;
+                  }}
+                >
+                  <i className="ri-file-fill text-gray-500"></i>
+                  <p className="font-semibold text-lg">{file}</p>
+                  {openFiles.includes(file) && (
+                    <i className="ri-arrow-right-s-line text-gray-500"></i>
+                  )}
+                </button>
+              ))}
             </div>
           </div>
-        </div>
-      )}
-
-      {/* Confirmation Dialog for Remove */}
-      {showConfirmation && userToRemove && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col p-6">
-            <h3 className="text-lg font-medium text-gray-900 mb-4">
-              Remove Collaborator
-            </h3>
-
-            <p className="text-gray-700 mb-6">
-              Are you sure you want to remove{" "}
-              <span className="font-medium">
-                {userToRemove.name || userToRemove.email}
-              </span>{" "}
-              from this project?
-            </p>
-
-            <div className="flex justify-end space-x-3">
-              <button
-                onClick={cancelRemoveUser}
-                className="px-4 py-2 border rounded-lg hover:bg-gray-50"
-                disabled={isRemoving}
-              >
-                Cancel
-              </button>
-              <button
-                onClick={confirmRemoveUser}
-                className="px-4 py-2 rounded-lg text-white bg-red-500 hover:bg-red-600"
-                disabled={isRemoving}
-              >
-                {isRemoving ? (
-                  <div className="flex items-center">
-                    <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full mr-2"></div>
-                    Removing...
-                  </div>
-                ) : (
-                  "Remove"
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      {/* Overlay for AI message panel - ADD THIS HERE */}
-      {isAIMessagePanelOpen && (
-        <div
-          className="fixed inset-0 bg-black bg-opacity-30 z-30"
-          onClick={() => setIsAIMessagePanelOpen(false)}
-        ></div>
-      )}
-      {/* AI Message Detail Panel */}
-      {isAIMessagePanelOpen && selectedAIMessage && (
-        <section className="ai-message-panel fixed right-0 top-0 h-screen w-full md:w-2/3 lg:w-1/2 bg-white shadow-xl z-40 overflow-y-auto flex flex-col transition-all duration-300 ease-in-out">
-          <header className="sticky top-0 bg-purple-100 p-4 border-b border-purple-200 flex justify-between items-center z-10">
-            <h3 className="font-semibold text-purple-900">
-              <i className="ri-robot-line mr-2"></i>
-              AI Assistant
-            </h3>
-            <button
-              onClick={() => setIsAIMessagePanelOpen(false)}
-              className="p-2 rounded-full hover:bg-purple-200 transition"
-            >
-              <i className="ri-close-line text-lg"></i>
-            </button>
-          </header>
-          <div className="flex-1 p-6 overflow-y-auto">
-            <div className="max-w-3xl mx-auto">
-              <div className="text-sm text-gray-500 mb-4">
-                {new Date(selectedAIMessage.timestamp).toLocaleString()}
-              </div>
-              <div className="bg-purple-50 p-6 rounded-lg shadow-sm border border-purple-100">
-                <div className="prose prose-lg markdown-content">
-                  <Markdown
-                    options={{
-                      overrides: {
-                        // Override for code inline elements
-                        code: {
-                          component: ({ className, children }) => {
-                            // Only apply SyntaxHighlighter to code blocks with language class
-                            if (className) {
-                              const language = className.replace(
-                                "language-",
-                                ""
-                              );
-                              return (
-                                <SyntaxHighlighter
-                                  language={language}
-                                  style={oneDark}
-                                  showLineNumbers
-                                >
-                                  {children}
-                                </SyntaxHighlighter>
-                              );
-                            }
-                            // For inline code, return a simple code element
-                            return <code>{children}</code>;
-                          },
-                        },
-                        // Handle pre blocks directly to avoid nesting issues
-                        pre: {
-                          component: ({ children }) => {
-                            // Extract code element if it exists
-                            if (React.Children.count(children) === 1) {
-                              const child = React.Children.only(children);
-                              if (
-                                React.isValidElement(child) &&
-                                child.type === "code"
-                              ) {
-                                // Skip rendering the <pre> since SyntaxHighlighter will handle it
-                                return child;
-                              }
-                            }
-                            // Otherwise pass through as normal pre
-                            return <pre>{children}</pre>;
-                          },
-                        },
-                        // Prevent paragraphs from wrapping code blocks
-                        p: {
-                          component: ({ children }) => {
-                            // Check for direct SyntaxHighlighter children or code > SyntaxHighlighter patterns
-                            const childArray = React.Children.toArray(children);
-
-                            // If there's only one child and it's a SyntaxHighlighter or code element
-                            if (childArray.length === 1) {
-                              const onlyChild = childArray[0];
-                              if (
-                                React.isValidElement(onlyChild) &&
-                                (onlyChild.type === SyntaxHighlighter ||
-                                  onlyChild.type === "code")
-                              ) {
-                                return <>{onlyChild}</>;
-                              }
-                            }
-
-                            return <p>{children}</p>;
-                          },
-                        },
-                      },
+          {currentFile && (
+            <div className="code-editior flex flex-col flex-grow p-4 bg-white rounded-lg shadow-md overflow-hidden">
+              <div className="top ">
+                {openFiles.map((file) => (
+                  <button
+                    key={file}
+                    className="p-2 px-4 bg-gray-100 rounded-lg mb-2 cursor-pointer
+                  hover:bg-gray-200 transition duration-200 ease-in-out"
+                    onClick={() => {
+                      setCurrentFile(file);
                     }}
                   >
-                    {selectedAIMessage.message}
-                  </Markdown>
+                    <i className="ri-file-fill text-gray-500"></i>
+                    <p className="font-semibold text-lg">{file}</p>
+                  </button>
+                ))}
+              </div>
+              <div className="bottom h-full flex flex-col">
+                {fileTree[currentFile] && (
+                  <div className="relative h-full w-full">
+                    {/* Syntax highlighted code */}
+                    <div
+                      className="hljs-code-container h-full overflow-auto p-4 rounded-lg"
+                      style={{
+                        backgroundColor: "#1e1e1e",
+                        position: "absolute",
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        boxSizing: "border-box",
+                      }}
+                    >
+                      <pre className="hljs-code m-0 p-0">
+                        <code
+                          dangerouslySetInnerHTML={{
+                            __html: hljs.highlightAuto(
+                              fileTree[currentFile].file.contents || "",
+                              [
+                                fileTree[currentFile].language ||
+                                  currentFile.split(".").pop() ||
+                                  "",
+                              ]
+                            ).value,
+                          }}
+                          className="code-with-line-numbers"
+                          style={{
+                            fontFamily: "Consolas, monospace", // Use a single font with no fallbacks
+                            fontSize: "14px", // Exact pixel size
+                            lineHeight: "1.5",
+                            letterSpacing: 0, // Ensure character spacing is exact
+                            wordSpacing: 0,
+                            whiteSpace: "pre",
+                            tabSize: 2,
+                            padding: 0,
+                            margin: 0,
+                          }}
+                        />
+                      </pre>
+                    </div>
+
+                    {/* Editing textarea */}
+                    <textarea
+                      className="absolute inset-0 w-full h-full p-4 font-mono text-transparent"
+                      value={fileTree[currentFile].file.contents || ""}
+                      onChange={(e) => {
+                        const updatedContent = e.target.value;
+                        updateContent(currentFile, updatedContent);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Tab") {
+                          e.preventDefault();
+                          const start = e.target.selectionStart;
+                          const end = e.target.selectionEnd;
+
+                          // Insert two spaces for tab
+                          const newValue =
+                            e.target.value.substring(0, start) +
+                            "  " +
+                            e.target.value.substring(end);
+
+                          // Update content
+                          updateContent(currentFile, newValue);
+
+                          // Move cursor to correct position after tab
+                          setTimeout(() => {
+                            e.target.selectionStart = e.target.selectionEnd =
+                              start + 2;
+                          }, 0);
+                        }
+                      }}
+                      spellCheck="false"
+                      style={{
+                        fontFamily: "Consolas, monospace", // Exact match with the code element
+                        fontSize: "14px", // Exact match
+                        lineHeight: "1.5",
+                        letterSpacing: 0,
+                        wordSpacing: 0,
+                        caretColor: "#66D9EF",
+                        caretWidth: "2px",
+                        color: "rgba(255,255,255,0.5)", // Semi-transparent white instead of transparent
+                        backgroundColor: "transparent",
+                        resize: "none",
+                        cursor: "text",
+                        zIndex: 10,
+                        whiteSpace: "pre", // Use pre instead of pre-wrap
+                        tabSize: 2,
+                        overflow: "auto",
+                        boxSizing: "border-box", // Ensure box sizing matches
+                      }}
+                    />
+                  </div>
+                )}
+
+                {/* 🚀 Run Server Button */}
+                <div className="flex justify-end mt-4">
+                  <button
+                    onClick={() => {
+                      saveFileTree(fileTree);
+                      // You could also add a temporary visual indicator
+                      const saveBtn = document.activeElement;
+                      const originalText = saveBtn.innerHTML;
+                      saveBtn.innerHTML =
+                        '<i class="ri-check-line mr-2"></i>Saved!';
+                      setTimeout(() => {
+                        saveBtn.innerHTML = originalText;
+                      }, 2000);
+                    }}
+                    className="px-4 py-2 mr-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg transition"
+                  >
+                    <i className="ri-save-line mr-2"></i>
+                    Save Project
+                  </button>
+                  <button
+                    className={`${
+                      isServerRunning
+                        ? "bg-red-500 hover:bg-red-600"
+                        : "bg-green-500 hover:bg-green-600"
+                    } text-white px-4 py-2 rounded-lg transition`}
+                    onClick={async () => {
+                      if (isServerRunning) {
+                        // Stop the server
+                        if (serverProcess) {
+                          await serverProcess.kill(); // Kill the server process
+                          setServerProcess(null);
+                          setIsServerRunning(false);
+                          console.log("Server stopped.");
+                        }
+                      } else {
+                        // Start the server
+                        try {
+                          await webContainer?.mount(fileTree); // Mount the file tree
+                          const installProcess = await webContainer?.spawn(
+                            "npm",
+                            ["install"]
+                          );
+                          installProcess.output.pipeTo(
+                            new WritableStream({
+                              write(chunk) {
+                                console.log(chunk.toString());
+                              },
+                            })
+                          );
+                          const runProcess = await webContainer?.spawn("npm", [
+                            "start",
+                          ]);
+                          runProcess.output.pipeTo(
+                            new WritableStream({
+                              write(chunk) {
+                                console.log(chunk.toString());
+                              },
+                            })
+                          );
+                          setServerProcess(runProcess); // Save the server process
+                          setIsServerRunning(true);
+                          console.log("Server started.");
+
+                          // Listen for server-ready event
+                          webContainer?.on("server-ready", (port, url) => {
+                            console.log(`Server ready at ${url}`);
+                            setiframeUrl(url); // Set the iframe URL
+                          });
+                        } catch (error) {
+                          console.error("Error starting server:", error);
+                        }
+                      }
+                    }}
+                  >
+                    {isServerRunning ? "🛑 Stop Server" : "🚀 Run Server"}
+                  </button>
                 </div>
               </div>
+            </div>
+          )}
 
-              <div className="mt-6 flex justify-end">
+          {iframeUrl && webContainer && (
+            <div className="fixed top-20 right-4 z-40 w-1/3 h-1/2 bg-white rounded-lg shadow-md overflow-hidden">
+              <div className="flex justify-between items-center bg-slate-800 p-2">
+                <div className="address-bar flex-1 flex items-center">
+                  <input
+                    type="text"
+                    value={iframeUrl}
+                    onChange={(e) => setiframeUrl(e.target.value)}
+                    className="w-full p-2 bg-slate-700 hover:bg-slate-800 transition text-white rounded-lg text-sm"
+                  />
+                </div>
                 <button
-                  onClick={() => setIsAIMessagePanelOpen(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+                  onClick={() => setiframeUrl(null)}
+                  className="ml-2 text-white hover:text-red-400 transition p-1"
                 >
-                  Close
+                  <i className="ri-close-line"></i>
+                </button>
+              </div>
+              <iframe
+                src={iframeUrl}
+                className="w-full h-[calc(100%-40px)]"
+              ></iframe>
+            </div>
+          )}
+        </section>
+        {/* User Selection Modal */}
+        {isModalOpen && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col">
+              {/* Modal Header */}
+              <div className="flex justify-between items-center p-4 border-b">
+                <h3 className="text-lg font-medium">Select Collaborators</h3>
+                <button
+                  onClick={handleCloseModal}
+                  className="p-1 rounded-full hover:bg-gray-100"
+                >
+                  <i className="ri-close-line text-xl"></i>
+                </button>
+              </div>
+
+              {/* Modal Body - User List */}
+              <div className="overflow-y-auto p-4 flex-grow">
+                {isLoading ? (
+                  <div className="flex justify-center items-center h-32">
+                    <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
+                  </div>
+                ) : error ? (
+                  <div className="text-center text-red-500 py-4">{error}</div>
+                ) : (
+                  <div className="space-y-2">
+                    {users
+                      .filter(
+                        (user) =>
+                          !projectMembers.some(
+                            (member) => member._id === user._id
+                          )
+                      )
+                      .map((user) => (
+                        <div
+                          key={user._id}
+                          onClick={() => toggleUserSelection(user._id)}
+                          className={`flex items-center gap-3 p-3 rounded-lg cursor-pointer transition-colors ${
+                            selectedUsers.includes(user._id)
+                              ? "bg-blue-100 border border-blue-300"
+                              : "hover:bg-gray-50 border border-transparent"
+                          }`}
+                        >
+                          <div className="relative">
+                            <img
+                              src={getAvatar(user.gender)}
+                              alt={`${user.name || user.email}'s avatar`}
+                              className="w-12 h-12 rounded-full"
+                            />
+                            {selectedUsers.includes(user._id) && (
+                              <div className="absolute -top-1 -right-1 bg-blue-500 rounded-full w-5 h-5 flex items-center justify-center">
+                                <i className="ri-check-line text-white text-sm"></i>
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex-grow">
+                            <p className="font-medium">
+                              {user.name || user.email.split("@")[0]}
+                            </p>
+                            <p className="text-sm text-gray-500">
+                              {user.email}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Modal Footer */}
+              <div className="border-t p-4 flex justify-end space-x-3">
+                <button
+                  onClick={handleCloseModal}
+                  className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSaveSelection}
+                  disabled={selectedUsers.length === 0 || isLoading}
+                  className={`px-4 py-2 rounded-lg text-white ${
+                    selectedUsers.length === 0 || isLoading
+                      ? "bg-blue-300 cursor-not-allowed"
+                      : "bg-blue-500 hover:bg-blue-600"
+                  }`}
+                >
+                  Add Selected ({selectedUsers.length})
                 </button>
               </div>
             </div>
           </div>
-        </section>
-      )}
-    </main>
+        )}
+
+        {/* Confirmation Dialog for Remove */}
+        {showConfirmation && userToRemove && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[90vh] flex flex-col p-6">
+              <h3 className="text-lg font-medium text-gray-900 mb-4">
+                Remove Collaborator
+              </h3>
+
+              <p className="text-gray-700 mb-6">
+                Are you sure you want to remove{" "}
+                <span className="font-medium">
+                  {userToRemove.name || userToRemove.email}
+                </span>{" "}
+                from this project?
+              </p>
+
+              <div className="flex justify-end space-x-3">
+                <button
+                  onClick={cancelRemoveUser}
+                  className="px-4 py-2 border rounded-lg hover:bg-gray-50"
+                  disabled={isRemoving}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={confirmRemoveUser}
+                  className="px-4 py-2 rounded-lg text-white bg-red-500 hover:bg-red-600"
+                  disabled={isRemoving}
+                >
+                  {isRemoving ? (
+                    <div className="flex items-center">
+                      <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full mr-2"></div>
+                      Removing...
+                    </div>
+                  ) : (
+                    "Remove"
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Overlay for AI message panel - ADD THIS HERE */}
+        {isAIMessagePanelOpen && (
+          <div
+            className="fixed inset-0 bg-black bg-opacity-30 z-30"
+            onClick={() => setIsAIMessagePanelOpen(false)}
+          ></div>
+        )}
+        {/* AI Message Detail Panel */}
+        {isAIMessagePanelOpen && selectedAIMessage && (
+          <section className="ai-message-panel fixed right-0 top-0 h-screen w-full md:w-2/3 lg:w-1/2 bg-white shadow-xl z-40 overflow-y-auto flex flex-col transition-all duration-300 ease-in-out">
+            <header className="sticky top-0 bg-purple-100 p-4 border-b border-purple-200 flex justify-between items-center z-10">
+              <h3 className="font-semibold text-purple-900">
+                <i className="ri-robot-line mr-2"></i>
+                AI Assistant
+              </h3>
+              <button
+                onClick={() => setIsAIMessagePanelOpen(false)}
+                className="p-2 rounded-full hover:bg-purple-200 transition"
+              >
+                <i className="ri-close-line text-lg"></i>
+              </button>
+            </header>
+            <div className="flex-1 p-6 overflow-y-auto">
+              <div className="max-w-3xl mx-auto">
+                <div className="text-sm text-gray-500 mb-4">
+                  {new Date(selectedAIMessage.timestamp).toLocaleString()}
+                </div>
+                <div className="bg-purple-50 p-6 rounded-lg shadow-sm border border-purple-100">
+                  <div className="prose prose-lg markdown-content">
+                    <Markdown
+                      options={{
+                        overrides: {
+                          // Override for code inline elements
+                          code: {
+                            component: ({ className, children }) => {
+                              // Only apply SyntaxHighlighter to code blocks with language class
+                              if (className) {
+                                const language = className.replace(
+                                  "language-",
+                                  ""
+                                );
+                                return (
+                                  <SyntaxHighlighter
+                                    language={language}
+                                    style={oneDark}
+                                    showLineNumbers
+                                  >
+                                    {children}
+                                  </SyntaxHighlighter>
+                                );
+                              }
+                              // For inline code, return a simple code element
+                              return <code>{children}</code>;
+                            },
+                          },
+                          // Handle pre blocks directly to avoid nesting issues
+                          pre: {
+                            component: ({ children }) => {
+                              // Extract code element if it exists
+                              if (React.Children.count(children) === 1) {
+                                const child = React.Children.only(children);
+                                if (
+                                  React.isValidElement(child) &&
+                                  child.type === "code"
+                                ) {
+                                  // Skip rendering the <pre> since SyntaxHighlighter will handle it
+                                  return child;
+                                }
+                              }
+                              // Otherwise pass through as normal pre
+                              return <pre>{children}</pre>;
+                            },
+                          },
+                          // Prevent paragraphs from wrapping code blocks
+                          p: {
+                            component: ({ children }) => {
+                              // Check for direct SyntaxHighlighter children or code > SyntaxHighlighter patterns
+                              const childArray =
+                                React.Children.toArray(children);
+
+                              // If there's only one child and it's a SyntaxHighlighter or code element
+                              if (childArray.length === 1) {
+                                const onlyChild = childArray[0];
+                                if (
+                                  React.isValidElement(onlyChild) &&
+                                  (onlyChild.type === SyntaxHighlighter ||
+                                    onlyChild.type === "code")
+                                ) {
+                                  return <>{onlyChild}</>;
+                                }
+                              }
+
+                              return <p>{children}</p>;
+                            },
+                          },
+                        },
+                      }}
+                    >
+                      {selectedAIMessage.message}
+                    </Markdown>
+                  </div>
+                </div>
+
+                <div className="mt-6 flex justify-end">
+                  <button
+                    onClick={() => setIsAIMessagePanelOpen(false)}
+                    className="px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+      </main>
+    </>
   );
 };
 

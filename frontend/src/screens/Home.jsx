@@ -14,7 +14,7 @@ const Home = () => {
     const token = localStorage.getItem("token");
     console.log(
       "Current token in localStorage:",
-      token ? "Present" : "Missing"
+      token ? "Present" : "Missing",
     );
 
     if (!token) {
@@ -59,6 +59,7 @@ const Home = () => {
       });
 
       console.log("Project created successfully:", response.data);
+      setProject((prevProjects) => [...prevProjects, response.data]);
       setIsModalOpen(false);
       setProjectName("");
     } catch (err) {
@@ -68,7 +69,7 @@ const Home = () => {
         console.error(
           "Server response:",
           err.response.status,
-          err.response.data
+          err.response.data,
         );
         if (err.response.status === 401) {
           setError("Authentication failed. Please log in again.");

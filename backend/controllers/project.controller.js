@@ -53,7 +53,6 @@ export const addUserToProject = async (req, res) => {
         projectId,
         currentUserId, // Changed to match the service parameter name
       });
-
       res.status(200).json({
         message: "Users added successfully",
         project: updatedProject,

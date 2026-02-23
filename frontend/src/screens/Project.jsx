@@ -12,7 +12,7 @@ import Markdown from "markdown-to-jsx";
 import { createRoot } from "react-dom/client";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
-// Add these imports at the top of your file
+
 import hljs from "highlight.js";
 import "highlight.js/styles/vs2015.css";
 import { getWebContainer } from "../config/webContainer.js";
@@ -86,12 +86,31 @@ const Project = () => {
     initContainer();
 
     receiveMessage("project-message", (data) => {
-      console.log("Received message:", JSON.parse(data.message));
-      const message = JSON.parse(data.message);
-      if (message.fileTree) {
-        setFileTree(message.fileTree);
+      // Handle message processing safely
+      try {
+        // Try to parse as JSON for structured data like file trees
+        console.log("Received message:", data.message);
+        const parsedMessage = JSON.parse(data.message);
+
+        // Handle file tree updates or other structured data
+        if (parsedMessage.fileTree) {
+          setFileTree(parsedMessage.fileTree);
+
+          // Only attempt to mount if valid file tree data exists
+          if (webContainer && parsedMessage.fileTree) {
+            try {
+              webContainer.mount(parsedMessage.fileTree);
+            } catch (mountError) {
+              console.error("Error mounting file tree:", mountError);
+            }
+          }
+        }
+      } catch (parseError) {
+        // If parsing fails, it's a regular text message (not JSON)
+        console.log("Received text message:", data.message);
+        // Continue with message display - no need for special handling
       }
-      webContainer?.mount[message.fileTree].file.contents;
+
       // Check if this message is from the current logged-in user
       const isOwnMessage = data.sender === user._id;
 
@@ -909,10 +928,10 @@ const Project = () => {
               </div>
               <div className="bottom h-full flex flex-col">
                 {fileTree[currentFile] && (
-                  <div className="relative h-full w-full">
-                    {/* Syntax highlighted code */}
+                  <div className="relative h-full w-full code-editor-container">
+                    {/* Syntax highlighted code - NO SCROLL HERE */}
                     <div
-                      className="hljs-code-container h-full overflow-auto p-4 rounded-lg"
+                      className="hljs-code-container h-full p-4 rounded-lg"
                       style={{
                         backgroundColor: "#1e1e1e",
                         position: "absolute",
@@ -921,7 +940,10 @@ const Project = () => {
                         right: 0,
                         bottom: 0,
                         boxSizing: "border-box",
+                        overflow: "hidden", // Remove scroll from this layer
+                        pointerEvents: "none", // Prevents this layer from capturing mouse events
                       }}
+                      id="syntax-layer"
                     >
                       <pre className="hljs-code m-0 p-0">
                         <code
@@ -937,10 +959,10 @@ const Project = () => {
                           }}
                           className="code-with-line-numbers"
                           style={{
-                            fontFamily: "Consolas, monospace", // Use a single font with no fallbacks
-                            fontSize: "14px", // Exact pixel size
+                            fontFamily: "Consolas, monospace",
+                            fontSize: "14px",
                             lineHeight: "1.5",
-                            letterSpacing: 0, // Ensure character spacing is exact
+                            letterSpacing: 0,
                             wordSpacing: 0,
                             whiteSpace: "pre",
                             tabSize: 2,
@@ -951,13 +973,22 @@ const Project = () => {
                       </pre>
                     </div>
 
-                    {/* Editing textarea */}
+                    {/* Editing textarea - THIS HANDLES SCROLLING */}
                     <textarea
-                      className="absolute inset-0 w-full h-full p-4 font-mono text-transparent"
+                      className="absolute inset-0 w-full h-full p-4 font-mono"
                       value={fileTree[currentFile].file.contents || ""}
                       onChange={(e) => {
                         const updatedContent = e.target.value;
                         updateContent(currentFile, updatedContent);
+                      }}
+                      onScroll={(e) => {
+                        // Sync scroll position to the syntax layer
+                        const syntaxLayer =
+                          document.getElementById("syntax-layer");
+                        if (syntaxLayer) {
+                          syntaxLayer.scrollTop = e.target.scrollTop;
+                          syntaxLayer.scrollLeft = e.target.scrollLeft;
+                        }
                       }}
                       onKeyDown={(e) => {
                         if (e.key === "Tab") {
@@ -965,16 +996,13 @@ const Project = () => {
                           const start = e.target.selectionStart;
                           const end = e.target.selectionEnd;
 
-                          // Insert two spaces for tab
                           const newValue =
                             e.target.value.substring(0, start) +
                             "  " +
                             e.target.value.substring(end);
 
-                          // Update content
                           updateContent(currentFile, newValue);
 
-                          // Move cursor to correct position after tab
                           setTimeout(() => {
                             e.target.selectionStart = e.target.selectionEnd =
                               start + 2;
@@ -983,22 +1011,22 @@ const Project = () => {
                       }}
                       spellCheck="false"
                       style={{
-                        fontFamily: "Consolas, monospace", // Exact match with the code element
-                        fontSize: "14px", // Exact match
+                        fontFamily: "Consolas, monospace",
+                        fontSize: "14px",
                         lineHeight: "1.5",
                         letterSpacing: 0,
                         wordSpacing: 0,
                         caretColor: "#66D9EF",
-                        caretWidth: "2px",
-                        color: "rgba(255,255,255,0.5)", // Semi-transparent white instead of transparent
+                        color: "transparent", // Make text transparent
                         backgroundColor: "transparent",
                         resize: "none",
                         cursor: "text",
                         zIndex: 10,
-                        whiteSpace: "pre", // Use pre instead of pre-wrap
+                        whiteSpace: "pre",
                         tabSize: 2,
-                        overflow: "auto",
-                        boxSizing: "border-box", // Ensure box sizing matches
+                        overflow: "auto", // This handles scrolling
+                        boxSizing: "border-box",
+                        caretWidth: "2px",
                       }}
                     />
                   </div>
